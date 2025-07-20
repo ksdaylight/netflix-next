@@ -1,0 +1,96 @@
+name: CI/CD Pipeline for Next.js
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18.x"
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Next.js App
+        run: npm run build
+
+      # - name: Docker Login
+      #   uses: docker/login-action@v2
+      #   with:
+      #     registry: ghcr.io
+      #     username: ${{ github.actor }}
+      #     password: ${{ secrets.PAT_TOKEN }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Docker Build and Push
+        id: build-push
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.ECR_REGISTRY }}/ai-call-center-deps-cache:${{ github.sha }}
+            ${{ secrets.ECR_REGISTRY }}/ai-call-center-deps-cache:latest
+
+      - name: Checkout Infra Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ksdaylight/infrastructure
+          ref: "main"
+          token: ${{ secrets.INFRASTRUCTURE_TOKEN }}
+          path: infrastructure
+
+      - name: Verify File Presence
+        run: |
+          echo "Checking file presence:"
+          ls -la infrastructure/k8s/netflix-next/
+          cat infrastructure/k8s/netflix-next/deployment.yml
+
+      - name: Update Deployment Manifest
+        run: |
+          echo "Updating deployment manifest:"
+          # Print the file content before changes
+          echo "Before update:"
+          cat infrastructure/k8s/netflix-next/deployment.yml
+
+          # Update the image tag in the deployment manifest with the digest
+          sed -i "s|image: .*/ai-call-center-deps-cache:.*|image: ${{ secrets.ECR_REGISTRY }}/ai-call-center-deps-cache:${{ github.sha }}|g" infrastructure/k8s/netflix-next/deployment.yml
+
+          # Print the file content after changes
+          echo "After update:"
+          cat infrastructure/k8s/netflix-next/deployment.yml
+
+      - name: Stage and Commit Changes
+        run: |
+          cd infrastructure
+          git config user.name "GitHub Actions Bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add k8s/netflix-next/deployment.yml
+          # Verify the staging
+          git status
+          # Commit and push changes if there are modifications
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update image to version ${{ github.sha }}"
+            git push origin main
+          fi
